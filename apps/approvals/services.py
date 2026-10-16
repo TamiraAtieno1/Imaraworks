@@ -53,6 +53,7 @@ AUDIT_AMOUNT_CHANGED = AuditLog.AMOUNT_CHANGED
 
 MSG_REASON_REQUIRED = "A reason is required to reject a request."
 MSG_AMOUNT_LOCKED = "The amount can no longer be changed for this request."
+MSG_NOT_REQUESTER_EDIT = "Only the person who created this request can change its amount."
 
 
 class ApprovalDenied(Exception):
@@ -344,7 +345,7 @@ _EDITABLE_STATUSES = {STATUS_DRAFT, STATUS_SUBMITTED, STATUS_PENDING, STATUS_APP
 _PRE_APPROVAL_STATUSES = {STATUS_DRAFT, STATUS_SUBMITTED}
 
 
-def decide_amount_change(*, status, old_amount, new_amount, approved_levels):
+def decide_amount_change(*, is_requester, status, old_amount, new_amount, approved_levels):
     """Work out the result of changing a request's amount, or raise AmountChangeDenied.
 
     Returns None if the amount didn't actually change (nothing to do).
@@ -357,7 +358,15 @@ def decide_amount_change(*, status, old_amount, new_amount, approved_levels):
     Re-tiering needs no special code: approval always reads required_levels()
     on the CURRENT amount, so a request that now crosses 50k automatically needs
     finance too. ``retiered`` is only reported here so the audit log shows it.
+
+    Only the requester may change the amount: it is their request, and an
+    approver editing it would be approving a number nobody asked for. This is
+    checked first, so someone else's request never reveals whether its amount
+    is still editable.
     """
+    if not is_requester:
+        raise AmountChangeDenied(MSG_NOT_REQUESTER_EDIT)
+
     old_amount = Decimal(str(old_amount))
     new_amount = Decimal(str(new_amount))
     if new_amount == old_amount:
@@ -389,3 +398,48 @@ def decide_amount_change(*, status, old_amount, new_amount, approved_levels):
             "retiered": retiered,
         },
     )
+
+
+def change_amount(payment_request, user, new_amount):
+    """Save a new amount on ``payment_request``. Returns the AmountChangeDecision,
+    or None if the amount is the same.
+
+    Raises AmountChangeDenied (nothing written) if the status locks the amount.
+
+    Same shape as approve(): lock, decide, write. The approvals that counted
+    are marked superseded rather than deleted, so the audit trail still shows
+    who approved the old amount.
+
+    Raises AmountChangeDenied too if ``user`` didn't create the request. That
+    rule lives in decide_amount_change(), so it is checked under the lock with
+    the others.
+    """
+    with transaction.atomic():
+        locked = PaymentRequest.objects.select_for_update().get(pk=payment_request.pk)
+
+        decision = decide_amount_change(
+            is_requester=(locked.requester_id == user.id),
+            status=locked.status,
+            old_amount=locked.amount,
+            new_amount=new_amount,
+            approved_levels=_counting_levels(locked),
+        )
+        if decision is None:
+            return None
+
+        locked.approvals.filter(
+            decision=Approval.APPROVED,
+            superseded=False,
+            level__in=decision.supersede_levels,
+        ).update(superseded=True)
+        locked.amount = Decimal(str(new_amount))
+        locked.status = decision.new_status
+        locked.save(update_fields=["amount", "status", "updated_at"])
+        AuditLog.objects.create(
+            request=locked,
+            actor=user,
+            action=decision.audit_action,
+            details=decision.audit_details,
+        )
+
+    return decision

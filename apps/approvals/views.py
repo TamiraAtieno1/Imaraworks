@@ -14,13 +14,17 @@ from apps.accounts.permissions import get_role
 from apps.payment_requests.views import visible_requests
 
 from . import logic
-from .serializers import QueueItemSerializer
+from .serializers import AmountChangeSerializer, QueueItemSerializer
 from .services import (
+    MSG_AMOUNT_LOCKED,
+    MSG_NOT_REQUESTER_EDIT,
     MSG_REASON_REQUIRED,
+    AmountChangeDenied,
     ApprovalDenied,
     approval_queue,
     approval_summary,
     approve,
+    change_amount,
     reject,
 )
 
@@ -35,6 +39,8 @@ DENIAL_STATUS = {
     logic.MSG_NOT_REQUIRED: status.HTTP_403_FORBIDDEN,
     logic.MSG_ALREADY_APPROVED: status.HTTP_409_CONFLICT,
     MSG_REASON_REQUIRED: status.HTTP_400_BAD_REQUEST,
+    MSG_NOT_REQUESTER_EDIT: status.HTTP_403_FORBIDDEN,
+    MSG_AMOUNT_LOCKED: status.HTTP_409_CONFLICT,
 }
 
 
@@ -94,3 +100,21 @@ class RejectView(APIView):
             "reason": decision.reason,
             "approval": approval_summary(payment_request),
         })
+
+
+class AmountChangeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        payment_request = get_object_or_404(visible_requests(request.user), pk=pk)
+        # The body is checked before the rules: a malformed amount is a 400
+        # whoever sends it, and saying so reveals nothing about the request.
+        body = AmountChangeSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        try:
+            change_amount(payment_request, request.user, body.validated_data["amount"])
+        except AmountChangeDenied as exc:
+            return denied_response(exc)
+        payment_request.refresh_from_db()
+        # Same response as submit: the full request plus its approval block.
+        return Response(QueueItemSerializer(payment_request).data)

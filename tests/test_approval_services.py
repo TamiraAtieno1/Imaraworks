@@ -14,6 +14,7 @@ from apps.approvals.services import (
     AUDIT_APPROVED,
     AUDIT_REJECTED,
     MSG_AMOUNT_LOCKED,
+    MSG_NOT_REQUESTER_EDIT,
     MSG_REASON_REQUIRED,
     STATUS_APPROVED,
     STATUS_DRAFT,
@@ -183,6 +184,7 @@ class DecideAmountChangeTests(SimpleTestCase):
     def _decide(self, **overrides):
         """An approved 42,000 request changed to 45,000 (same tier), tweak per test."""
         base = dict(
+            is_requester=True,
             status=STATUS_APPROVED,
             old_amount=42_000,
             new_amount=45_000,
@@ -270,3 +272,17 @@ class DecideAmountChangeTests(SimpleTestCase):
             "superseded_levels": [M],
             "retiered": True,
         })
+
+    # --- Rule: only the requester may change the amount ---
+    def test_only_the_requester_can_change_the_amount(self):
+        with self.assertRaises(AmountChangeDenied) as ctx:
+            self._decide(is_requester=False)
+        self.assertEqual(ctx.exception.reason, MSG_NOT_REQUESTER_EDIT)
+
+    def test_requester_check_comes_first(self):
+        # Even a locked request or an unchanged amount says "not yours" first.
+        for overrides in ({"status": STATUS_REJECTED}, {"new_amount": 42_000}):
+            with self.subTest(**overrides):
+                with self.assertRaises(AmountChangeDenied) as ctx:
+                    self._decide(is_requester=False, **overrides)
+                self.assertEqual(ctx.exception.reason, MSG_NOT_REQUESTER_EDIT)

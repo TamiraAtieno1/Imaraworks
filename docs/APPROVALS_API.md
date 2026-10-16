@@ -16,7 +16,7 @@ Levels are lowercase: `manager`, `finance`. A MANAGER user approves as `manager`
 
 ## The `approval` block
 
-The queue and the approve/reject responses include this block, so pages can show "Waiting on Finance" and similar:
+The queue, the amount-change response and the approve/reject responses include this block, so pages can show "Waiting on Finance" and similar:
 
 ```json
 "approval": {
@@ -34,6 +34,7 @@ The queue and the approve/reject responses include this block, so pages can show
 | GET | /api/approvals/queue/ | MANAGER, FINANCE | Requests waiting on **my** decision |
 | POST | /api/payment-requests/<id>/approve/ | MANAGER, FINANCE | Approve at my level |
 | POST | /api/payment-requests/<id>/reject/ | MANAGER, FINANCE | Reject with a reason |
+| PATCH | /api/payment-requests/<id>/amount/ | The request's requester (any role) | Change the amount |
 | GET | /api/payment-requests/<id>/history/ | Anyone who can see the request | Audit trail of one request |
 | GET | /api/audit/ | ADMIN | Whole audit log |
 
@@ -94,6 +95,39 @@ Checks run in this order, and the first one that fails is returned:
 
 `403` means "not you", `409` means "not now" (the request's state changed, so reload it), and `400` means "fix your input".
 
+### PATCH /api/payment-requests/<id>/amount/
+```json
+{"amount": "67000.00"}
+```
+Only the person who created the request can change its amount, whatever their role. An approver can't change the number they approved.
+
+| Status before | What happens |
+|---|---|
+| `DRAFT`, `SUBMITTED` | Amount changes, status stays the same |
+| `PENDING_APPROVAL`, `APPROVED` | Amount changes, **every approval so far stops counting** (even for a decrease), status goes to `PENDING_APPROVAL`. The levels are recalculated from the new amount, so 42,000 → 67,000 now needs finance too. |
+| anything else | `409`, the amount is locked |
+
+Sending the amount it already has changes nothing and writes no history entry.
+
+200: the full request, with the same fields as `GET /api/payment-requests/<id>/`, plus `approval`:
+```json
+{
+  "id": 7, "amount": "67000.00", "status": "PENDING_APPROVAL", "...": "...",
+  "approval": {"required_levels": ["finance", "manager"], "approved_levels": [], "outstanding_levels": ["finance", "manager"]}
+}
+```
+
+Errors (checked in this order):
+
+| Status | Body | When |
+|---|---|---|
+| 404 | `{"detail": "Not found."}` | No such request, or you can't see it (another employee's request, or any ADMIN) |
+| 400 | `{"amount": ["..."]}` | Missing, not a number, ≤ 0, more than 2 decimal places, or too large (12 digits max) |
+| 403 | `{"detail": "Only the person who created this request can change its amount."}` | You can see it but didn't create it |
+| 409 | `{"detail": "The amount can no longer be changed for this request."}` | Status is `REJECTED`, `PROCESSING`, `PAID` or `FAILED` |
+
+A bad body is a `400` whoever sends it: it says nothing about the request.
+
 ### GET /api/payment-requests/<id>/history/
 You can see a request's history exactly when you can see the request (see "Who sees what" in API.md). Anyone else gets `404`. The list is oldest first.
 ```json
@@ -117,5 +151,6 @@ ADMIN only, and read-only. Admins can't see payment requests or payment data (se
 Optional filter: `?action=REJECTED`.
 
 ## Not covered here
-- Editing a request (amount changes) and Submit (`SUBMITTED` → `PENDING_APPROVAL`): these endpoints don't exist yet, and their owner hasn't been agreed.
+- Submit (`DRAFT` → `PENDING_APPROVAL`): in a separate PR (#17).
+- Editing fields other than the amount.
 - Payment processing (Part C).
