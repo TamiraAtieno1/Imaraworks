@@ -23,6 +23,10 @@ python manage.py runserver
 | faith | Finance Officer |
 | grace | Administrator |
 
+## Known limitations
+
+- **A request over KES 50,000 raised by faith can never be fully approved.** Requests over KES 50,000 need a manager and a finance approval, and nobody may approve their own request. faith is the only Finance user, so nobody can give the finance approval and the request stays in `PENDING_APPROVAL`. faith's requests of KES 50,000 or less are approved as normal by carol or david. This is the separation of duties working as intended: a real finance team has more than one person, and the demo data seeds only one. To see a large request go through, raise it as another user. (Decided in #15.)
+
 ## Project structure
 
 - `apps/accounts` - roles, login, `/api/auth/me/`
