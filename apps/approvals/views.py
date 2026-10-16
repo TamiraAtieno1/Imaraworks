@@ -16,12 +16,16 @@ from apps.payment_requests.views import visible_requests
 from . import logic
 from .serializers import QueueItemSerializer
 from .services import (
+    MSG_ALREADY_SUBMITTED,
+    MSG_NOT_REQUESTER,
     MSG_REASON_REQUIRED,
     ApprovalDenied,
+    SubmitDenied,
     approval_queue,
     approval_summary,
     approve,
     reject,
+    submit,
 )
 
 # Which HTTP status each refusal becomes:
@@ -35,6 +39,8 @@ DENIAL_STATUS = {
     logic.MSG_NOT_REQUIRED: status.HTTP_403_FORBIDDEN,
     logic.MSG_ALREADY_APPROVED: status.HTTP_409_CONFLICT,
     MSG_REASON_REQUIRED: status.HTTP_400_BAD_REQUEST,
+    MSG_NOT_REQUESTER: status.HTTP_403_FORBIDDEN,
+    MSG_ALREADY_SUBMITTED: status.HTTP_409_CONFLICT,
 }
 
 
@@ -94,3 +100,19 @@ class RejectView(APIView):
             "reason": decision.reason,
             "approval": approval_summary(payment_request),
         })
+
+
+class SubmitView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        # 404 first, as for approve: you can't submit what you can't see.
+        payment_request = get_object_or_404(visible_requests(request.user), pk=pk)
+        try:
+            submit(payment_request, request.user)
+        except SubmitDenied as exc:
+            return denied_response(exc)
+        payment_request.refresh_from_db()
+        # The full request plus its approval block (asked for on PR #5), so the
+        # page can update the row without fetching it again.
+        return Response(QueueItemSerializer(payment_request).data)
