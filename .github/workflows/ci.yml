@@ -26,6 +26,9 @@ jobs:
 
       - name: Check for missing migrations
         # Fails if someone changed a model but forgot to commit its migration.
+        # Not a test run, so it needs the dev setting to get the dev secret key (#21).
+        env:
+          DJANGO_DEBUG: "1"
         run: python manage.py makemigrations --check --dry-run
 
       - name: Run tests

@@ -10,22 +10,27 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
+import sys
 from pathlib import Path
+
+from imaraworks.env import allowed_hosts_from, debug_from, secret_key_from
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# Quick-start development settings - unsuitable for production
+# Deployment settings come from environment variables, never from this file
+# (issue #21). See imaraworks/env.py for the rules and README "Setup" for usage.
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-bhs-#6wze-z3a57we*w$t5+j*#g-1hs0e@w+lhj6o78(ft!2b8'
+TESTING = 'test' in sys.argv
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = debug_from(os.environ)
 
-ALLOWED_HOSTS = []
+SECRET_KEY = secret_key_from(os.environ, debug=DEBUG, testing=TESTING)
+
+ALLOWED_HOSTS = allowed_hosts_from(os.environ)
 
 
 # Application definition
@@ -137,6 +142,5 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-import sys
-if 'test' in sys.argv:
+if TESTING:
     PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
