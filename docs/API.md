@@ -182,6 +182,8 @@ Optional filter: `?status=PAID` (any status value above, uppercase) narrows the 
 
 Optional date range: `?date_from=2026-10-01&date_to=2026-10-31` (YYYY-MM-DD, either one alone is fine) keeps requests whose `date` is in the range, **including both end days**, so that example is all of October. It combines with `?status=`. A badly formatted date gives 400 on that field, and `date_from` after `date_to` gives 400: `{"date_to": ["Must be on or after date_from."]}`.
 
+Optional payment-date range: `?paid_from=2026-10-01&paid_to=2026-10-31` keeps requests whose **successful payment completed** in the range, so that example is "money paid out in October", whenever the request was raised. Use this, not `date_from`/`date_to`, for paid totals. Days are Kenyan days (EAT, UTC+3): a payment at 01:00 on 1 November in Nairobi counts in November. Failed payment attempts never count, so only paid requests can match, and each request is counted once. It combines with `?status=` and `?date_from=`/`?date_to=`, with the same 400s (`{"paid_to": ["Must be on or after paid_from."]}`).
+
 ## Not built yet
 
 Submit, approve and reject; payment processing; audit trail; search filters on the list. Don't call these. Their contracts will be added here by the people who build them.

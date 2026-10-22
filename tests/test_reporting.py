@@ -4,7 +4,7 @@ Reports: totals over payment requests, scoped to what the user can see.
 Uses the case-study amounts (24,500 / 67,000 / 148,000 / 42,000).
 """
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from django.contrib.auth.models import User
@@ -13,6 +13,7 @@ from rest_framework.test import APITestCase
 
 from apps.accounts.models import Profile
 from apps.payment_requests.models import PaymentRequest, Project
+from apps.payments.models import PaymentTransaction
 from apps.reporting.services import (
     filter_requests, summary, totals_by_project, totals_by_status, totals_by_vendor,
 )
@@ -223,3 +224,103 @@ class ReportDateFilterTests(ReportData, APITestCase):
 
     def test_same_day_range_is_allowed(self):
         self.assertEqual(self.overall(date_from='2026-10-01', date_to='2026-10-01')['count'], 2)
+
+
+EAT = timezone(timedelta(hours=3))
+
+
+class ReportPaidDateFilterTests(ReportData, APITestCase):
+    """paid_from/paid_to count money by when it was paid out, in Kenyan days (#41).
+
+    24,500 (alice): requested 30 Sep, paid 2 Oct 10:00, after a failed try on 1 Oct.
+    15,000 (brian): requested 1 Oct, paid 31 Oct 23:30 (20:30 UTC, still 31 Oct).
+    9,000 (brian): requested 1 Oct, failed 20 Oct, paid 1 Nov 01:00 (31 Oct 22:00 UTC).
+    """
+
+    def setUp(self):
+        self.make_data()
+        first = PaymentRequest.objects.get(amount=Decimal('24500'))
+        PaymentRequest.objects.filter(pk=first.pk).update(date=date(2026, 9, 30))
+        self.pay(first, datetime(2026, 10, 1, 9, 0, tzinfo=EAT), PaymentTransaction.FAILED)
+        self.pay(first, datetime(2026, 10, 2, 10, 0, tzinfo=EAT))
+        late = self.make_request(self.brian, '15000.00', PaymentRequest.PAID, self.metro, self.kisumu)
+        self.pay(late, datetime(2026, 10, 31, 23, 30, tzinfo=EAT))
+        nov = self.make_request(self.brian, '9000.00', PaymentRequest.PAID, self.metro, self.kisumu)
+        self.pay(nov, datetime(2026, 10, 20, 12, 0, tzinfo=EAT), PaymentTransaction.FAILED)
+        self.pay(nov, datetime(2026, 11, 1, 1, 0, tzinfo=EAT))
+        PaymentRequest.objects.filter(pk__in=[late.pk, nov.pk]).update(date=date(2026, 10, 1))
+        self.client.force_authenticate(self.carol)
+
+    def pay(self, req, when, status=PaymentTransaction.SUCCESS):
+        count = req.payment_transactions.count()
+        PaymentTransaction.objects.create(
+            request=req, idempotency_key=f'key-{req.pk}-{count}', amount=req.amount,
+            status=status, completed_at=when,
+        )
+
+    def overall(self, **params):
+        res = self.client.get(URL, params)
+        self.assertEqual(res.status_code, 200)
+        return res.data['overall']
+
+    def test_october_counts_money_paid_in_october(self):
+        # 24,500 was requested in September but paid in October, so it's in.
+        # 9,000 was paid at 01:00 on 1 November in Nairobi, so it's out, even
+        # though that is still 31 October in UTC.
+        self.assertEqual(self.overall(paid_from='2026-10-01', paid_to='2026-10-31'),
+                         {'count': 2, 'total': '39500.00'})
+
+    def test_request_date_range_gives_a_different_answer(self):
+        # The same month by request date: the difference #41 is about.
+        self.assertEqual(self.overall(date_from='2026-10-01', date_to='2026-10-31',
+                                      status=PaymentRequest.PAID),
+                         {'count': 2, 'total': '24000.00'})
+
+    def test_last_minutes_of_the_day_count_in_that_day(self):
+        self.assertEqual(self.overall(paid_from='2026-10-31', paid_to='2026-10-31'),
+                         {'count': 1, 'total': '15000.00'})
+
+    def test_paid_from_alone(self):
+        self.assertEqual(self.overall(paid_from='2026-11-01'), {'count': 1, 'total': '9000.00'})
+
+    def test_paid_to_alone(self):
+        self.assertEqual(self.overall(paid_to='2026-10-02'), {'count': 1, 'total': '24500.00'})
+
+    def test_failed_attempts_do_not_count(self):
+        # 24,500 failed on 1 Oct and 9,000 failed on 20 Oct; no money moved on either day.
+        self.assertEqual(self.overall(paid_from='2026-10-01', paid_to='2026-10-01'),
+                         {'count': 0, 'total': '0.00'})
+        self.assertEqual(self.overall(paid_from='2026-10-20', paid_to='2026-10-20'),
+                         {'count': 0, 'total': '0.00'})
+
+    def test_a_request_with_several_transactions_is_counted_once(self):
+        res = self.client.get(URL, {'paid_from': '2026-10-01', 'paid_to': '2026-10-02'})
+        self.assertEqual(res.data['by_vendor'],
+                         [{'id': self.metro.id, 'name': 'Metro Hardware Ltd.',
+                           'count': 1, 'total': '24500.00'}])
+
+    def test_unpaid_requests_never_match(self):
+        res = self.client.get(URL, {'paid_from': '2026-01-01'})
+        self.assertEqual(res.data['pending_approval'], {'count': 0, 'total': '0.00'})
+        self.assertEqual(res.data['paid'], res.data['overall'])
+
+    def test_combines_with_request_date(self):
+        # Raised in October and paid in October: only 15,000.
+        self.assertEqual(self.overall(date_from='2026-10-01', paid_from='2026-10-01',
+                                      paid_to='2026-10-31'),
+                         {'count': 1, 'total': '15000.00'})
+
+    def test_employee_still_sees_only_their_own(self):
+        self.client.force_authenticate(self.alice)
+        self.assertEqual(self.overall(paid_from='2026-10-01', paid_to='2026-10-31'),
+                         {'count': 1, 'total': '24500.00'})
+
+    def test_bad_paid_date_is_rejected(self):
+        res = self.client.get(URL, {'paid_to': '31-10-2026'})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('paid_to', res.data)
+
+    def test_reversed_paid_range_is_rejected(self):
+        res = self.client.get(URL, {'paid_from': '2026-10-31', 'paid_to': '2026-10-01'})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['paid_to'], ['Must be on or after paid_from.'])

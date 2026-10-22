@@ -29,11 +29,14 @@ class ReportFilters(serializers.Serializer):
     status = serializers.ChoiceField(choices=PaymentRequest.STATUS_CHOICES, required=False)
     date_from = serializers.DateField(required=False)
     date_to = serializers.DateField(required=False)
+    paid_from = serializers.DateField(required=False)
+    paid_to = serializers.DateField(required=False)
 
     def validate(self, attrs):
         # A reversed range is almost certainly a mistake; an empty report would hide it.
-        if 'date_from' in attrs and 'date_to' in attrs and attrs['date_from'] > attrs['date_to']:
-            raise serializers.ValidationError({'date_to': 'Must be on or after date_from.'})
+        for start, end in (('date_from', 'date_to'), ('paid_from', 'paid_to')):
+            if start in attrs and end in attrs and attrs[start] > attrs[end]:
+                raise serializers.ValidationError({end: f'Must be on or after {start}.'})
         return attrs
 
 
