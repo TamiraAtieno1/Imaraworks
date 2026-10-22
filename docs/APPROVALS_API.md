@@ -67,10 +67,12 @@ Each item has the same fields as `GET /api/payment-requests/<id>/`, plus `approv
 ```json
 [{
   "id": 7, "vendor_name": "SwiftHaul Logistics", "requester_username": "alice",
-  "amount": "67000.00", "status": "PENDING_APPROVAL", "created_at": "...",
+  "amount": "67000.00", "status": "PENDING_APPROVAL", "created_at": "...", "submitted_at": "...",
   "approval": {"required_levels": ["finance", "manager"], "approved_levels": [], "outstanding_levels": ["finance", "manager"]}
 }]
 ```
+For a "waiting since" column, use `submitted_at` (see [API.md](API.md)).
+
 EMPLOYEE and ADMIN users get `403`.
 
 ### POST /api/payment-requests/<id>/approve/

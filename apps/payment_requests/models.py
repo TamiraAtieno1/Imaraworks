@@ -53,6 +53,11 @@ class PaymentRequest(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=DRAFT)
 
     created_at = models.DateTimeField(auto_now_add=True)
+    # When the request last went into PENDING_APPROVAL: set on submit, and again
+    # when an amount change sends it back for approval. Approval queues count
+    # "waiting" from here, not from created_at, so time spent as a draft
+    # doesn't count. Empty for drafts (#40).
+    submitted_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

@@ -9,6 +9,7 @@ import datetime
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.utils.dateparse import parse_datetime
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import Profile
@@ -68,6 +69,13 @@ class SubmitApiTests(APITestCase):
             'approved_levels': [],
             'outstanding_levels': sorted([M, F]),
         })
+
+    def test_response_includes_submitted_at(self):
+        req = self.make_request('24500')
+        res = self.submit_as(self.alice, req)
+        req.refresh_from_db()
+        self.assertIsNotNone(res.data['submitted_at'])
+        self.assertEqual(parse_datetime(res.data['submitted_at']), req.submitted_at)
 
     def test_submitted_request_shows_in_managers_queue(self):
         req = self.make_request('24500')

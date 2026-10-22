@@ -88,6 +88,7 @@ Sorted by name.
   "notes": "",
   "status": "DRAFT",
   "created_at": "2026-10-14T01:00:00Z",
+  "submitted_at": null,
   "updated_at": "2026-10-14T01:00:00Z",
   "approval": {"required_levels": ["manager"], "approved_levels": [], "outstanding_levels": []}
 }
@@ -95,6 +96,7 @@ Sorted by name.
 - `requester_name` is the full name, or the username if the user has no name set.
 - `approval` shows which approval levels are needed, done and still outstanding. See [APPROVALS_API.md](APPROVALS_API.md#the-approval-block).
 - `amount` is a string, not a number. Format it for display and don't do arithmetic on it directly.
+- `submitted_at` is when the request last went into `PENDING_APPROVAL`: set on submit, and set again when an amount change sends it back for approval. It's `null` for drafts. Count "waiting" times from this, not from `created_at`, so time spent as a draft doesn't count. Read-only; if sent, it is ignored.
 - Timestamps are UTC.
 - `status` values: `DRAFT`, `SUBMITTED`, `PENDING_APPROVAL`, `APPROVED`, `REJECTED`, `PROCESSING`, `PAID`, `FAILED`.
 

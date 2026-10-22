@@ -16,7 +16,7 @@ class PaymentRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentRequest
         fields = '__all__'
-        read_only_fields = ['requester', 'status', 'created_at', 'updated_at']
+        read_only_fields = ['requester', 'status', 'created_at', 'submitted_at', 'updated_at']
 
     def get_requester_name(self, obj: PaymentRequest) -> str:
         return obj.requester.get_full_name() or obj.requester.username

@@ -46,6 +46,13 @@ class PaymentRequestApiTests(APITestCase):
         res = self.client.post(self.url, self.payload(status='APPROVED'), format='json')
         self.assertEqual(res.data['status'], 'DRAFT')
 
+    def test_new_draft_has_no_submitted_at_and_client_cannot_set_it(self):
+        self.client.force_authenticate(self.alice)
+        res = self.client.post(
+            self.url, self.payload(submitted_at='2026-01-01T00:00:00Z'), format='json')
+        self.assertEqual(res.status_code, 201)
+        self.assertIsNone(res.data['submitted_at'])
+
     def test_duplicate_invoice_returns_400(self):
         self.client.force_authenticate(self.alice)
         self.client.post(self.url, self.payload(), format='json')

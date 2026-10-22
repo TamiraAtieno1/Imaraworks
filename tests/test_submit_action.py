@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from django.contrib.auth.models import User
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.accounts.models import Profile
 from apps.approvals.logic import LEVEL_FINANCE as F, LEVEL_MANAGER as M
@@ -61,6 +62,7 @@ class SubmitActionTests(TestCase):
     def assert_nothing_written(self, req, status=PaymentRequest.DRAFT):
         req.refresh_from_db()
         self.assertEqual(req.status, status)
+        self.assertIsNone(req.submitted_at)
         self.assertFalse(req.audit_logs.exists())
 
     # --- allowed ---
@@ -94,6 +96,15 @@ class SubmitActionTests(TestCase):
         submit(req, self.alice)
         self.assertIn(req, approval_queue(self.carol))
 
+    def test_submit_records_when_the_approval_wait_starts(self):
+        req = self.make_request('24500')
+        self.assertIsNone(req.submitted_at)
+        before = timezone.now()
+        submit(req, self.alice)
+        req.refresh_from_db()
+        self.assertGreaterEqual(req.submitted_at, before)
+        self.assertGreater(req.submitted_at, req.created_at)
+
     # --- refused: nothing written ---
 
     def test_someone_else_cannot_submit(self):
@@ -111,6 +122,15 @@ class SubmitActionTests(TestCase):
         submit(req, self.alice)
         self.assert_denied(req, self.alice, MSG_ALREADY_SUBMITTED)
         self.assertEqual(req.audit_logs.count(), 1)
+
+    def test_second_submit_leaves_submitted_at_alone(self):
+        req = self.make_request('24500')
+        submit(req, self.alice)
+        req.refresh_from_db()
+        first = req.submitted_at
+        self.assert_denied(req, self.alice, MSG_ALREADY_SUBMITTED)
+        req.refresh_from_db()
+        self.assertEqual(req.submitted_at, first)
 
     def test_rejected_request_cannot_be_resubmitted(self):
         req = self.make_request('24500', status=PaymentRequest.REJECTED)

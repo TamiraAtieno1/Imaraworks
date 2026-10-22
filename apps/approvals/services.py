@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 
 from apps.accounts.permissions import get_role
 from apps.approvals.logic import (
@@ -414,7 +415,8 @@ def submit(payment_request, user):
         )
 
         locked.status = decision.new_status
-        locked.save(update_fields=["status", "updated_at"])
+        locked.submitted_at = timezone.now()
+        locked.save(update_fields=["status", "submitted_at", "updated_at"])
         AuditLog.objects.create(
             request=locked,
             actor=user,
@@ -544,8 +546,15 @@ def change_amount(payment_request, user, new_amount):
             level__in=decision.supersede_levels,
         ).update(superseded=True)
         locked.amount = Decimal(str(new_amount))
+        fields = ["amount", "status", "updated_at"]
+        # Sent back for approval: approvers are now looking at a new amount,
+        # so the wait for approval starts again. A draft's change leaves it
+        # a draft, with no wait to restart.
+        if decision.new_status == STATUS_PENDING:
+            locked.submitted_at = timezone.now()
+            fields.append("submitted_at")
         locked.status = decision.new_status
-        locked.save(update_fields=["amount", "status", "updated_at"])
+        locked.save(update_fields=fields)
         AuditLog.objects.create(
             request=locked,
             actor=user,

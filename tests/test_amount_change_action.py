@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from django.contrib.auth.models import User
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.accounts.models import Profile
 from apps.approvals.logic import LEVEL_FINANCE as F, LEVEL_MANAGER as M
@@ -87,6 +88,27 @@ class ChangeAmountTests(TestCase):
         req.refresh_from_db()
         self.assertEqual(req.status, PaymentRequest.PENDING_APPROVAL)
 
+    def test_change_after_approval_restarts_the_approval_wait(self):
+        # The approvers are now being asked about a new amount, so the
+        # queue's "waiting" time counts from the change.
+        req = self.make_request('24500')
+        req.submitted_at = timezone.now() - datetime.timedelta(days=3)
+        req.save()
+        approve(req, self.carol)
+        before = timezone.now()
+        change_amount(req, self.alice, '26000')
+        req.refresh_from_db()
+        self.assertGreaterEqual(req.submitted_at, before)
+
+    def test_change_while_pending_restarts_the_approval_wait(self):
+        req = self.make_request('24500')
+        req.submitted_at = timezone.now() - datetime.timedelta(days=3)
+        req.save()
+        before = timezone.now()
+        change_amount(req, self.alice, '26000')
+        req.refresh_from_db()
+        self.assertGreaterEqual(req.submitted_at, before)
+
     # --- Re-tiering across 50k ---
     def test_42000_raised_to_67000_now_needs_finance(self):
         req = self.make_request('42000')
@@ -133,6 +155,12 @@ class ChangeAmountTests(TestCase):
         change_amount(req, self.alice, '67000')
         req.refresh_from_db()
         self.assertEqual((req.status, req.amount), (PaymentRequest.DRAFT, Decimal('67000')))
+
+    def test_draft_change_does_not_set_submitted_at(self):
+        req = self.make_request('24500', status=PaymentRequest.DRAFT)
+        change_amount(req, self.alice, '67000')
+        req.refresh_from_db()
+        self.assertIsNone(req.submitted_at)
 
     def test_same_amount_writes_nothing(self):
         req = self.make_request('24500')
