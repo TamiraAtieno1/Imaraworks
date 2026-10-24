@@ -41,8 +41,6 @@
   .stat:first-child { padding-left: 0; border-left: none; }
   .stat .num { font-size: 26px; font-weight: 700; }
   .stat .label { font-size: 13px; color: var(--text-soft); margin-top: 2px; }
-  .by-project { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-soft); }
-  .by-project b { color: var(--text); font-weight: 600; }
 
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th { text-align: left; font-size: 12px; color: var(--text-soft); font-weight: 600; padding: 0 12px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -72,6 +70,9 @@
   dialog p { font-size: 13px; color: var(--text-soft); margin: 0 0 14px; }
   dialog textarea { width: 100%; min-height: 80px; resize: vertical; }
   .dialog-actions { display: flex; gap: 10px; margin-top: 16px; justify-content: flex-end; }
+
+  .report-grid { display: flex; gap: 32px; flex-wrap: wrap; }
+  .report-grid table { flex: 1; min-width: 280px; }
 </style>
 </head>
 <body>
@@ -91,10 +92,10 @@
       <div class="stat"><div class="num" id="stat-awaiting">0</div><div class="label">Requests awaiting approval</div></div>
       <div class="stat"><div class="num" id="stat-failed">0</div><div class="label">Failed payments</div></div>
     </div>
-    <div class="by-project" id="by-project"></div>
   </section>
 
   <h2>Needs your action</h2>
+  <div id="demo-box" class="hint" hidden><label><input type="checkbox" id="simulate-decline"> Demo only: make the mock provider decline the next payment</label></div>
   <p class="hint">Oldest first. Second approvals for requests above KES 50,000, payments ready to send, and failed payments to retry.</p>
   <section class="panel">
     <table>
@@ -110,22 +111,22 @@
       <label>Vendor <input name="vendor" placeholder="Any"></label>
       <label>Requester <input name="requester" placeholder="Any"></label>
       <label>Project
-        <select name="project"><option value="">Any</option><option>Westlands</option><option>Kilimani</option></select>
+        <select name="project"><option value="">Any</option></select>
       </label>
       <label>Status
-        <select name="status">
+         <select name="status">
           <option value="">Any</option>
-          <option value="pending_manager">Waiting on manager</option>
-          <option value="pending_finance">Waiting on Finance</option>
-          <option value="approved">Approved</option>
-          <option value="paid">Paid</option>
-          <option value="failed">Payment failed</option>
-          <option value="rejected">Rejected</option>
+          <option value="DRAFT">Draft</option>
+          <option value="PENDING_APPROVAL">Waiting for approval</option>
+          <option value="APPROVED">Approved</option>
+          <option value="REJECTED">Rejected</option>
+          <option value="PROCESSING">Payment in progress</option>
+          <option value="PAID">Paid</option>
+          <option value="FAILED">Payment failed</option>
         </select>
       </label>
       <label>Payment method
-        <select name="method"><option value="">Any</option><option value="mpesa">M-Pesa</option><option value="bank">Bank transfer</option></select>
-      </label>
+      <select name="method"><option value="">Any</option><option value="MPESA">M-Pesa</option><option value="BANK_TRANSFER">Bank transfer</option><option value="CASH">Cash</option></select>      </label>
       <label>From <input type="date" name="from"></label>
       <label>To <input type="date" name="to"></label>
       <label>&nbsp;<button type="reset" class="btn-secondary">Clear filters</button></label>
@@ -136,13 +137,33 @@
     </table>
     <p class="empty" id="results-empty" hidden>No requests match these filters.</p>
   </section>
+   <h2>Paid totals</h2>
+  <p class="hint">Paid requests, by the date on the request. Leave the dates empty for everything.</p>  <section class="panel">
+    <form class="filters" id="report-filters">
+      <label>From <input type="date" name="date_from"></label>
+      <label>To <input type="date" name="date_to"></label>
+      <label>&nbsp;<button type="button" class="btn-secondary" id="report-clear">Clear dates</button></label>
+    </form>
+    <p class="empty" id="report-note" hidden></p>
+    <div class="report-grid">
+      <table>
+        <thead><tr><th>Project</th><th>Requests</th><th>Paid (KES)</th></tr></thead>
+        <tbody id="paid-by-project"></tbody>
+      </table>
+      <table>
+        <thead><tr><th>Vendor</th><th>Requests</th><th>Paid (KES)</th></tr></thead>
+        <tbody id="paid-by-vendor"></tbody>
+      </table>
+    </div>
+    <p class="empty" id="report-empty" hidden>Nothing has been paid in this period.</p>
+  </section>
 </main>
 
 <dialog id="reject-dialog">
   <form id="reject-form">
     <h3>Reject this request</h3>
     <p id="reject-target"></p>
-    <textarea id="reject-reason" placeholder="Why is this being rejected? The requester will see this." required></textarea>
+    <textarea id="reject-reason" placeholder="Why is this being rejected? This is recorded in the request's history." required></textarea>
     <div class="dialog-actions">
       <button type="button" class="btn-secondary" id="reject-cancel">Cancel</button>
       <button type="submit" class="btn-reject">Reject request</button>
@@ -152,227 +173,338 @@
 
 <script src="{% static 'frontend/auth.js' %}"></script>
 <script>
-  // ---- SETTINGS ----
-  // Placeholder: the real logged-in user will come from the API (a "who am I" endpoint).
-  let CURRENT_USER = "";
+    // ---- State ----
+  let ME = null;
+  let requests = [];         // every request, from GET /api/payment-requests/
+  let approvalQueue = [];    // requests waiting on MY approval, from GET /api/approvals/queue/
+  let failReasons = {};      // request id -> reason from its latest failed payment attempt
+  const pendingKeys = new Map();   // request id -> idempotency key of a payment whose outcome we have not seen yet
 
-  // ---- PLACEHOLDER DATA ----
-  // Remove once the API exists and use loadRequests() below instead.
-  const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+  const PAY_URL = id => `/api/payment-requests/${id}/pay/`;
+  const banner = document.getElementById("banner");
+  const filtersForm = document.getElementById("filters");
+  const reportForm = document.getElementById("report-filters");
 
-  let requests = [
-    { id: 1,  vendor: "SwiftHaul Logistics",   amount: 67000,  invoice_ref: "SH-820",   project: "Westlands", requester: "Alice Mwangi", method: "bank",  status: "pending_finance", date: daysAgo(3) },
-    { id: 2,  vendor: "Apex Electricals",      amount: 148000, invoice_ref: "AE-4103",  project: "Kilimani",  requester: "Brian Otieno", method: "bank",  status: "pending_finance", date: daysAgo(5) },
-    { id: 3,  vendor: "Metro Hardware Ltd.",   amount: 24500,  invoice_ref: "INV-1032", project: "Westlands", requester: "Alice Mwangi", method: "mpesa", status: "approved",        date: daysAgo(1) },
-    { id: 4,  vendor: "PowerHire Kenya",       amount: 42000,  invoice_ref: "PH-912",   project: "Kilimani",  requester: "Brian Otieno", method: "bank",  status: "approved",        date: daysAgo(2) },
-    { id: 5,  vendor: "Prime Cement Supplies", amount: 18000,  invoice_ref: "PC-2201",  project: "Kilimani",  requester: "Carol Wanjiku", method: "mpesa", status: "failed",         date: daysAgo(4), fail_reason: "Provider unavailable" },
-    { id: 6,  vendor: "BlueLine Plumbing",     amount: 31000,  invoice_ref: "BL-77",    project: "Westlands", requester: "Alice Mwangi", method: "bank",  status: "paid",            date: daysAgo(8) },
-    { id: 7,  vendor: "Metro Hardware Ltd.",   amount: 12800,  invoice_ref: "INV-0998", project: "Kilimani",  requester: "Brian Otieno", method: "mpesa", status: "paid",            date: daysAgo(12) },
-    { id: 8,  vendor: "Apex Electricals",      amount: 55000,  invoice_ref: "AE-4088",  project: "Westlands", requester: "Alice Mwangi", method: "bank",  status: "paid",            date: daysAgo(15) },
-    { id: 9,  vendor: "SwiftHaul Logistics",   amount: 9500,   invoice_ref: "SH-801",   project: "Kilimani",  requester: "Alice Mwangi", method: "mpesa", status: "rejected",        date: daysAgo(6) },
-    { id: 10, vendor: "Prime Cement Supplies", amount: 72000,  invoice_ref: "PC-2230",  project: "Westlands", requester: "Faith Njeri",  method: "bank",  status: "pending_finance", date: daysAgo(1) },
-    { id: 11, vendor: "PowerHire Kenya",       amount: 26000,  invoice_ref: "PH-931",   project: "Westlands", requester: "Brian Otieno", method: "mpesa", status: "pending_manager", date: daysAgo(0) },
-  ];
-
-  // ---- HELPERS ----
-  // Escapes text before it goes into innerHTML, so a vendor name like "<script>" can't run as code.
-  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const money = n => Number(n).toLocaleString();
-
+  // ---- Helpers ----
+  const METHOD = { MPESA: "M-Pesa", BANK_TRANSFER: "Bank transfer", CASH: "Cash" };
+  const LEVEL_NAME = { manager: "a manager", finance: "Finance" };
   const STATUS = {
-    pending_manager: { label: "Waiting on manager", cls: "badge-pending" },
-    pending_finance: { label: "Waiting on Finance", cls: "badge-pending" },
-    approved:        { label: "Approved",           cls: "badge-ok" },
-    paid:            { label: "Paid",               cls: "badge-ok" },
-    failed:          { label: "Payment failed",     cls: "badge-bad" },
-    rejected:        { label: "Rejected",           cls: "badge-bad" },
+    DRAFT:            { label: "Draft",                cls: "badge-pending" },
+    SUBMITTED:        { label: "Submitted",            cls: "badge-pending" },
+    PENDING_APPROVAL: { label: "Waiting for approval", cls: "badge-pending" },
+    APPROVED:         { label: "Approved",             cls: "badge-ok" },
+    REJECTED:         { label: "Rejected",             cls: "badge-bad" },
+    PROCESSING:       { label: "Payment in progress",  cls: "badge-pending" },
+    PAID:             { label: "Paid",                 cls: "badge-ok" },
+    FAILED:           { label: "Payment failed",       cls: "badge-bad" },
   };
-  const badge = s => `<span class="badge ${STATUS[s].cls}">${STATUS[s].label}</span>`;
-  const METHOD = { mpesa: "M-Pesa", bank: "Bank transfer" };
 
-  function waiting(dateStr) {
-    const d = Math.floor((Date.now() - new Date(dateStr)) / 864e5);
-    if (d < 1) return { text: "Today", late: false };
-    return { text: d + (d === 1 ? " day" : " days"), late: d >= 3 };
+  // Display only: amounts arrive as strings and are never added up in the browser.
+  const money = v => Number(v).toLocaleString();
+  const moneyText = v => Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const who = r => r.requester_name || r.requester_username;
+  const newKey = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now() + "-" + Math.random().toString(16).slice(2));
+
+  function el(tag, props, ...children) {   // builds elements with textContent, so server text never runs as HTML
+    const node = document.createElement(tag);
+    Object.assign(node, props || {});
+    node.append(...children);
+    return node;
+  }
+  const sub = text => el("span", { className: "sub", textContent: text });
+  function makeButton(text, cls, onClick) {
+    const b = el("button", { className: cls, textContent: text });
+    b.addEventListener("click", onClick);
+    return b;
   }
 
   function showBanner(message, isError) {
-    const b = document.getElementById("banner");
-    b.textContent = message;
-    b.className = isError ? "error" : "";
-    b.hidden = false;
+    banner.textContent = message;
+    banner.className = isError ? "error" : "";
+    banner.hidden = false;
   }
 
-  // ---- SUMMARY ----
-  function renderSummary() {
-    const paid = requests.filter(r => r.status === "paid");
-    document.getElementById("stat-paid").textContent = money(paid.reduce((t, r) => t + r.amount, 0));
-    document.getElementById("stat-awaiting").textContent = requests.filter(r => r.status === "pending_manager" || r.status === "pending_finance").length;
-    document.getElementById("stat-failed").textContent = requests.filter(r => r.status === "failed").length;
-
-    const byProject = {};
-    paid.forEach(r => { byProject[r.project] = (byProject[r.project] || 0) + r.amount; });
-    const parts = Object.entries(byProject).map(([p, t]) => `<b>${esc(p)}</b> KES ${money(t)}`);
-    document.getElementById("by-project").innerHTML = "Paid by project: " + (parts.join("&nbsp;&nbsp;&nbsp;") || "nothing yet");
+  async function readJson(res) {
+    try { return await res.json(); } catch (err) { return {}; }
   }
 
-  // ---- ACTION QUEUE ----
+  function errorText(body) {
+    if (body && body.detail) return String(body.detail);
+    const parts = Object.values(body || {}).flat().map(String);
+    return parts.length ? parts.join(" ") : "Something went wrong.";
+  }
+
+  function statusCell(r) {
+    const info = STATUS[r.status] || { label: r.status, cls: "badge-pending" };
+    const td = el("td", {}, el("span", { className: "badge " + info.cls, textContent: info.label }));
+    const levels = (r.approval && r.approval.outstanding_levels) || [];
+    if (r.status === "PENDING_APPROVAL" && levels.length) {
+      const order = l => (l === "manager" ? 0 : 1);
+      td.append(sub("Waiting on " + levels.slice().sort((a, b) => order(a) - order(b)).map(l => LEVEL_NAME[l] || l).join(" and ")));
+    }
+    return td;
+  }
+
+  // ---- Needs your action: approvals waiting on me, payments ready to send, failed payments to retry ----
   function renderQueue() {
     const body = document.getElementById("queue-body");
-    body.innerHTML = "";
-    const todo = requests
-      .filter(r => ["pending_finance", "approved", "failed"].includes(r.status))
-      .sort((a, b) => new Date(a.date) - new Date(b.date));
-    document.getElementById("queue-empty").hidden = todo.length > 0;
+    const items = [
+      ...approvalQueue.map(r => ({ r, kind: "approve" })),
+      ...requests.filter(r => r.status === "APPROVED").map(r => ({ r, kind: "pay" })),
+      ...requests.filter(r => r.status === "FAILED").map(r => ({ r, kind: "retry" })),
+    ].sort((a, b) => new Date(a.r.created_at) - new Date(b.r.created_at));
+    document.getElementById("queue-empty").hidden = items.length > 0;
 
-    todo.forEach(r => {
-      const w = waiting(r.date);
-      const isOwn = r.requester === CURRENT_USER;
-      let next = "", actions = "";
-
-      if (r.status === "pending_finance") {
-        next = "Second approval";
-        // NOTE: blocking your own request here is only feedback. The backend must enforce it too.
-        actions = isOwn
-          ? `<span class="own-note">You submitted this, so another Finance Officer needs to approve it.</span>`
-          : `<div class="actions">
-               <button class="btn-primary" data-action="approve" data-id="${Number(r.id)}">Approve</button>
-               <button class="btn-reject" data-action="reject" data-id="${Number(r.id)}">Reject</button>
-             </div>`;
-      } else if (r.status === "approved") {
-        next = "Ready to pay";
-        actions = `<button class="btn-primary" data-action="pay" data-id="${Number(r.id)}">Pay now</button>`;
+    body.replaceChildren(...items.map(({ r, kind }) => {
+      const days = Math.floor((Date.now() - new Date(r.created_at)) / 864e5);
+      const waitCell = el("td", {
+        className: "nowrap" + (days >= 3 ? " late" : ""),
+        textContent: days < 1 ? "Today" : days + (days === 1 ? " day" : " days"),
+      });
+      let next, actions;
+      if (kind === "approve") {
+        const others = ((r.approval && r.approval.outstanding_levels) || []).filter(l => l !== "finance");
+        next = el("td", { textContent: others.length ? "Your approval (a manager still has to approve)" : "Final approval" });
+        actions = el("div", { className: "actions" });
+        actions.append(
+          makeButton("Approve", "btn-primary", () => approve(r, actions)),
+          makeButton("Reject", "btn-reject", () => openReject(r)),
+        );
+      } else if (kind === "pay") {
+        next = el("td", { textContent: "Ready to pay" });
+        actions = makeButton("Pay now", "btn-primary", (e) => pay(r, e.currentTarget));
       } else {
-        next = `Payment failed<span class="sub">${esc(r.fail_reason || "Unknown reason")}</span>`;
-        actions = `<button class="btn-primary" data-action="pay" data-id="${Number(r.id)}">Retry payment</button>`;
+        next = el("td", {}, "Payment failed", sub(failReasons[r.id] || "Unknown reason"));
+        actions = makeButton("Retry payment", "btn-primary", (e) => pay(r, e.currentTarget));
       }
-
-      const row = document.createElement("tr");
-      row.innerHTML = `
-        <td>${esc(r.vendor)}<span class="sub">Invoice ${esc(r.invoice_ref)}, ${esc(r.project)} project, ${METHOD[r.method]}</span></td>
-        <td>${esc(r.requester)}</td>
-        <td class="nowrap">${money(r.amount)}</td>
-        <td class="nowrap ${w.late ? 'late' : ''}">${w.text}</td>
-        <td>${next}</td>
-        <td>${actions}</td>`;
-      body.appendChild(row);
-    });
+      // Decision on #33: Finance cannot pay a request they raised themselves (the API answers 403), so don't offer the button.
+      if (kind !== "approve" && r.requester === ME.id) {
+        actions = el("span", { className: "own-note", textContent: "You raised this request, so another Finance officer has to pay it." });
+      }
+      return el("tr", {},
+        el("td", {}, r.vendor_name, sub(`Invoice ${r.invoice_number}, ${r.project_name}, ${METHOD[r.payment_method] || r.payment_method}`)),
+        el("td", { textContent: who(r) }),
+        el("td", { className: "nowrap", textContent: money(r.amount) }),
+        waitCell, next, el("td", {}, actions));
+    }));
   }
 
-  // ---- SEARCH RESULTS ----
+  // ---- All requests, filtered in the browser ----
   function renderResults() {
-    const f = document.getElementById("filters");
-    const v = name => f.elements[name].value.trim().toLowerCase();
-    const rows = requests
-      .filter(r => (!v("vendor") || r.vendor.toLowerCase().includes(v("vendor"))) &&
-                   (!v("requester") || r.requester.toLowerCase().includes(v("requester"))) &&
-                   (!v("project") || r.project.toLowerCase() === v("project")) &&
-                   (!v("status") || r.status === v("status")) &&
-                   (!v("method") || r.method === v("method")) &&
-                   (!v("from") || r.date >= v("from")) &&
-                   (!v("to") || r.date <= v("to")))
+    const f = filtersForm.elements;
+    const text = name => f[name].value.trim().toLowerCase();
+    const rows = requests.filter(r =>
+        (!text("vendor") || r.vendor_name.toLowerCase().includes(text("vendor"))) &&
+        (!text("requester") || (who(r) + " " + r.requester_username).toLowerCase().includes(text("requester"))) &&
+        (!f.project.value || r.project_name === f.project.value) &&
+        (!f.status.value || r.status === f.status.value) &&
+        (!f.method.value || r.payment_method === f.method.value) &&
+        (!f.from.value || r.date >= f.from.value) &&
+        (!f.to.value || r.date <= f.to.value))
       .sort((a, b) => b.date.localeCompare(a.date));
 
-    const body = document.getElementById("results-body");
-    body.innerHTML = rows.map(r => `<tr>
-        <td>${esc(r.vendor)}<span class="sub">Invoice ${esc(r.invoice_ref)}</span></td>
-        <td>${esc(r.requester)}</td><td>${esc(r.project)}</td>
-        <td class="nowrap">${money(r.amount)}</td><td>${METHOD[r.method]}</td>
-        <td>${badge(r.status)}</td><td class="nowrap">${esc(r.date)}</td></tr>`).join("");
+    document.getElementById("results-body").replaceChildren(...rows.map(r => el("tr", {},
+      el("td", {}, r.vendor_name, sub(`Invoice ${r.invoice_number}`)),
+      el("td", { textContent: who(r) }),
+      el("td", { textContent: r.project_name }),
+      el("td", { className: "nowrap", textContent: money(r.amount) }),
+      el("td", { textContent: METHOD[r.payment_method] || r.payment_method }),
+      statusCell(r),
+      el("td", { className: "nowrap", textContent: r.date }))));
     document.getElementById("results-empty").hidden = rows.length > 0;
   }
 
-  function renderAll() { renderSummary(); renderQueue(); renderResults(); }
-
-  // ---- SWAP-IN POINT 1: load all requests from the API (URL is a guess, confirm with the backend) ----
-  // async function loadRequests() {
-  //   const response = await AUTH.apiFetch('/api/requests/');
-  //   requests = await response.json();
-  //   renderAll();
-  // }
-  // loadRequests();
-  // For the filters, the same call can take query parameters: /api/requests/?vendor=...&status=...
-
-  renderAll();
-  document.getElementById("filters").addEventListener("input", renderResults);
-  document.getElementById("filters").addEventListener("reset", () => setTimeout(renderResults, 0));
-
-  // ---- SECOND APPROVAL ----
-  async function approve(id) {
-    const r = requests.find(x => x.id === id);
-    // ---- SWAP-IN POINT 2: POST /api/requests/${id}/approve/ (URL is a guess) ----
-    r.status = "approved";
-    renderAll();
-    showBanner(`Approved ${r.vendor}. It is ready to pay.`);
+  // ---- Loading from the API ----
+  async function loadRequests() {
+    const res = await AUTH.apiFetch("/api/payment-requests/");
+    if (!res.ok) { showBanner("Could not load the requests.", true); return; }
+    requests = await res.json();
   }
 
-  // ---- PAY / RETRY ----
-  // The button is disabled the moment it is clicked, so a double click cannot send two payments.
-  // The backend must ALSO refuse a repeat call for the same request (idempotency); the UI alone is never enough.
-  async function pay(id, btn) {
-    btn.disabled = true;
-    btn.textContent = "Processing";
-    const r = requests.find(x => x.id === id);
+  async function loadApprovalQueue() {
+    const res = await AUTH.apiFetch("/api/approvals/queue/");
+    if (!res.ok) { showBanner("Could not load the approval queue.", true); return; }
+    approvalQueue = await res.json();
+  }
 
-    // ---- SWAP-IN POINT 3: POST /api/requests/${id}/pay/ (URL is a guess). The mock provider runs behind it. ----
-    // const response = await AUTH.apiFetch(`/api/requests/${id}/pay/`, { method: 'POST' });
-    // const result = await response.json();   // e.g. { status: "SUCCESS" } or { status: "FAILED", reason: "..." }
-    await new Promise(res => setTimeout(res, 700));   // placeholder: pretend the provider takes a moment
-    const success = Math.random() > 0.25;              // placeholder: roughly one in four payments fails
+  async function loadFailReasons() {
+    const res = await AUTH.apiFetch("/api/payments/transactions/");
+    if (!res.ok) return;
+    failReasons = {};
+    (await res.json()).forEach(t => {   // newest first, so the first FAILED we meet for a request is its latest
+      if (t.status === "FAILED" && !(t.request in failReasons)) failReasons[t.request] = t.provider_reason || "";
+    });
+  }
 
-    if (success) {
-      r.status = "paid"; delete r.fail_reason;
-      showBanner(`Paid ${r.vendor}, KES ${money(r.amount)}.`);
-    } else {
-      r.status = "failed"; r.fail_reason = "Provider unavailable";
-      showBanner(`Payment to ${r.vendor} failed: provider unavailable. You can retry from the list.`, true);
+  async function loadProjectFilter() {
+    const res = await AUTH.apiFetch("/api/projects/");
+    if (!res.ok) return;
+    (await res.json()).forEach(p => filtersForm.elements.project.append(new Option(p.name, p.name)));
+  }
+
+  function setCards(paid, awaiting, failed) {
+    document.getElementById("stat-paid").textContent = paid;
+    document.getElementById("stat-awaiting").textContent = awaiting;
+    document.getElementById("stat-failed").textContent = failed;
+  }
+
+  async function loadCards() {   // the plain summary: all requests, no filters
+    const res = await AUTH.apiFetch("/api/reports/summary/");
+    if (!res.ok) { setCards("-", "-", "-"); return; }
+    const s = await res.json();
+    const failed = s.by_status.find(x => x.status === "FAILED");
+    setCards(moneyText(s.paid.total), s.pending_approval.count, failed ? failed.count : 0);
+  }
+
+  function fillReport(id, rows) {
+    document.getElementById(id).replaceChildren(...rows.map(r => el("tr", {},
+      el("td", { textContent: r.name }),
+      el("td", { textContent: r.count }),
+      el("td", { className: "nowrap", textContent: moneyText(r.total) }))));
+  }
+
+  async function loadPaidTables() {   // only PAID requests, optionally inside a date range
+    const f = reportForm.elements;
+    const params = new URLSearchParams({ status: "PAID" });
+    if (f.date_from.value) params.set("date_from", f.date_from.value);
+    if (f.date_to.value) params.set("date_to", f.date_to.value);
+    const res = await AUTH.apiFetch("/api/reports/summary/?" + params);
+    const note = document.getElementById("report-note");
+    if (!res.ok) {
+      note.textContent = res.status === 404 ? "Reports are not available on this server yet." : errorText(await readJson(res));
+      note.hidden = false;
+      fillReport("paid-by-project", []);
+      fillReport("paid-by-vendor", []);
+      document.getElementById("report-empty").hidden = true;
+      return;
     }
-    renderAll();
+    note.hidden = true;
+    const s = await res.json();
+    fillReport("paid-by-project", s.by_project);
+    fillReport("paid-by-vendor", s.by_vendor);
+    document.getElementById("report-empty").hidden = s.by_project.length > 0;
   }
 
-  // ---- REJECT (reason is required) ----
+  async function loadAll() {
+    try {
+      await Promise.all([loadRequests(), loadApprovalQueue(), loadFailReasons(), loadCards(), loadPaidTables()]);
+    } catch (err) {
+      console.error(err);
+      showBanner("Could not reach the server. Check your connection and reload.", true);
+    }
+    renderQueue();
+    renderResults();
+  }
+
+  // ---- Approve (second approvals) ----
+  async function approve(r, actions) {
+    actions.querySelectorAll("button").forEach(b => { b.disabled = true; });
+    try {
+      const res = await AUTH.apiFetch(`/api/payment-requests/${r.id}/approve/`, { method: "POST" });
+      const body = await readJson(res);
+      if (res.ok) {
+        const left = (body.approval && body.approval.outstanding_levels) || [];
+        showBanner(left.length
+          ? `Approved ${r.vendor_name}. Now waiting on ${left.map(l => LEVEL_NAME[l] || l).join(" and ")}.`
+          : `Approved ${r.vendor_name}. It is ready to pay.`, false);
+      } else {
+        showBanner(res.status === 404 ? "This request is no longer available." : errorText(body), true);
+      }
+    } catch (err) {
+      console.error(err);
+      showBanner("Could not reach the server. Please try again.", true);
+    }
+    await loadAll();   // reload either way, so the list and its buttons match what the server now says
+  }
+
+  // ---- Reject (a reason is required) ----
   const dialog = document.getElementById("reject-dialog");
   const reasonBox = document.getElementById("reject-reason");
-  let rejectingId = null;
+  let rejecting = null;
 
-  function openReject(id) {
-    const r = requests.find(x => x.id === id);
-    rejectingId = id;
-    document.getElementById("reject-target").textContent = `${r.vendor}, KES ${money(r.amount)}`;
+  function openReject(r) {
+    rejecting = r;
+    document.getElementById("reject-target").textContent = `${r.vendor_name}, KES ${money(r.amount)}`;
     reasonBox.value = "";
     dialog.showModal();
   }
   document.getElementById("reject-cancel").addEventListener("click", () => dialog.close());
-  document.getElementById("reject-form").addEventListener("submit", (e) => {
+  document.getElementById("reject-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const reason = reasonBox.value.trim();
-    if (!reason) return;
-    const r = requests.find(x => x.id === rejectingId);
-    // ---- SWAP-IN POINT 4: POST /api/requests/${rejectingId}/reject/ with body { reason } (URL is a guess) ----
-    r.status = "rejected";
-    dialog.close();
-    renderAll();
-    showBanner(`Rejected ${r.vendor}. Your reason has been recorded.`);
+    if (!reason || !rejecting) return;
+    const target = rejecting;
+    const submit = e.target.querySelector("button[type=submit]");
+    submit.disabled = true;
+    try {
+      const res = await AUTH.apiFetch(`/api/payment-requests/${target.id}/reject/`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      });
+      const body = await readJson(res);
+      dialog.close();
+      if (res.ok) showBanner(`Rejected ${target.vendor_name}. Your reason has been recorded.`, false);
+      else showBanner(res.status === 404 ? "This request is no longer available." : errorText(body), true);
+    } catch (err) {
+      console.error(err);
+      dialog.close();
+      showBanner("Could not reach the server. Please try again.", true);
+    } finally {
+      submit.disabled = false;   // the same button is reused every time the dialog opens
+    }
+    await loadAll();
   });
 
-  // ---- One click listener for the action queue ----
-  document.getElementById("queue-body").addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-action]");
-    if (!btn) return;
-    const id = Number(btn.dataset.id);
-    if (btn.dataset.action === "approve") approve(id);
-    if (btn.dataset.action === "reject") openReject(id);
-    if (btn.dataset.action === "pay") pay(id, btn);
-  });
+  // ---- Pay / retry ----
+  // One idempotency key per attempt. It is kept only while the outcome is unknown (a network error), so pressing
+  // the button again replays the same attempt instead of charging twice. After a real answer, the next press is a new attempt.
+  async function pay(r, payButton) {
+    const label = payButton.textContent;
+    payButton.disabled = true;
+    payButton.textContent = "Processing...";
+    const key = pendingKeys.get(r.id) || newKey();
+    pendingKeys.set(r.id, key);
+    const payload = { idempotency_key: key };
+    if (document.getElementById("simulate-decline").checked) payload.description = "FAIL";   // demo: the mock provider declines this attempt
+
+    let res;
+    try {
+      res = await AUTH.apiFetch(PAY_URL(r.id), { method: "POST", body: JSON.stringify(payload) });
+    } catch (err) {
+      showBanner("Could not confirm whether the payment went through. Press the button again: the same attempt is reused, so it cannot be charged twice.", true);
+      payButton.disabled = false;
+      payButton.textContent = label;
+      return;
+    }
+    pendingKeys.delete(r.id);   // a real answer: the next press is a new attempt
+    const body = await readJson(res);
+    if (res.status === 200 || res.status === 201) {
+      const earlier = body.replayed ? " (this attempt had already been sent; showing its earlier result)" : "";
+      if (body.status === "SUCCESS") showBanner(`Paid ${r.vendor_name}, KES ${money(body.amount)}.${earlier}`, false);
+      else if (body.status === "FAILED") showBanner(`Payment to ${r.vendor_name} was declined${body.provider_reason ? ": " + body.provider_reason : ""}. You can retry from the list.${earlier}`, true);
+      else showBanner(`Payment to ${r.vendor_name} is still being processed. The list updates when it finishes.${earlier}`, false);    } else {
+      showBanner(errorText(body), true);   // 403, 404, 409 (not payable, already paid, in flight), 422 or 502
+    }
+    await loadAll();
+  }
+
+  // ---- Filters ----
+  filtersForm.addEventListener("input", renderResults);
+  filtersForm.addEventListener("reset", () => setTimeout(renderResults, 0));
+  filtersForm.addEventListener("submit", (e) => e.preventDefault());
+  reportForm.addEventListener("change", loadPaidTables);
+  reportForm.addEventListener("submit", (e) => e.preventDefault());
+  document.getElementById("report-clear").addEventListener("click", () => { reportForm.reset(); loadPaidTables(); });
   // ---- Role check: only a FINANCE user may see this page. Convenience only; the API enforces the rules. ----
-  (async () => {
+   (async () => {
     const me = await AUTH.requireRole(["FINANCE"]);
     if (!me) return;
+    ME = me;
     const name = `${me.first_name} ${me.last_name}`.trim() || me.username;
-    CURRENT_USER = name;
     document.getElementById("who").textContent = `${name} · Finance Officer`;
-    renderAll();
     document.getElementById("app").hidden = false;
+    if (new URLSearchParams(location.search).get("demo") === "1") document.getElementById("demo-box").hidden = false;   // demo aid: only shown when the address ends in ?demo=1
+    await Promise.all([loadProjectFilter(), loadAll()]);   // the real data loads inside the guard
   })();
 </script>
 
